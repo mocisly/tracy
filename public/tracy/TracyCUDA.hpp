@@ -661,9 +661,18 @@ namespace tracy
             ZoneScoped;
             tracy::SetThreadName("NVIDIA CUPTI Worker");
             CUptiResult status;
+            // Two-pass processing: GRAPH_TRACE records complete last on the GPU (after
+            // all their child kernels), so they appear at the end of the buffer. Process
+            // them first to populate the graphId->APICallInfo map before kernels look it up.
             CUpti_Activity* record = nullptr;
+            while (cuptiActivityGetNextRecord(buffer, validSize, &record) == CUPTI_SUCCESS) {
+                if (record->kind == CUPTI_ACTIVITY_KIND_GRAPH_TRACE)
+                    DoProcessDeviceEvent(record);
+            }
+            record = nullptr;
             while ((status = cuptiActivityGetNextRecord(buffer, validSize, &record)) == CUPTI_SUCCESS) {
-                DoProcessDeviceEvent(record);
+                if (record->kind != CUPTI_ACTIVITY_KIND_GRAPH_TRACE)
+                    DoProcessDeviceEvent(record);
             }
             if (status != CUPTI_ERROR_MAX_LIMIT_REACHED) {
                 CUptiCallChecked(status, "cuptiActivityGetNextRecord", TracyFile, TracyLine);
@@ -833,6 +842,10 @@ namespace tracy
                         { CUPTI_DRIVER_TRACE_CBID_cuEventSynchronize,    NON_STREAM_FUNC() },
                         { CUPTI_DRIVER_TRACE_CBID_cuCtxSynchronize,      NON_STREAM_FUNC() },
                         { CUPTI_DRIVER_TRACE_CBID_cuStreamWaitEvent,     GET_STREAM_FUNC(cuStreamWaitEvent_params, hStream) },
+                        // Graph launch: tracked so we can correlate GPU activities back to
+                        // the cuGraphLaunch call site via CUPTI_ACTIVITY_KIND_GRAPH_TRACE
+                        { CUPTI_DRIVER_TRACE_CBID_cuGraphLaunch,          GET_STREAM_FUNC(cuGraphLaunch_params, hStream) },
+                        { CUPTI_DRIVER_TRACE_CBID_cuGraphLaunch_ptsz,     GET_STREAM_FUNC(cuGraphLaunch_params, hStream) },
                     };
                     #undef NON_STREAM_FUNC
                     #undef GET_STREAM_FUNC
@@ -998,12 +1011,12 @@ namespace tracy
                 CUpti_ActivityKernel9* kernel9 = (CUpti_ActivityKernel9*) record;
                 APICallInfo apiCall;
                 if (!matchActivityToAPICall(kernel9->correlationId, apiCall)) {
-                    // Fallback for CUDA Graph-launched kernels: create GPU zone
-                    // using kernel timestamps when no API callback correlation exists.
-                    auto* host = PersistentState::Get().profilerHost;
-                    if (!host) return;
-                    TracyTimestamp cpuTime = tracyFromCUpti(kernel9->start);
-                    apiCall = APICallInfo{ cpuTime, cpuTime, kernel9->start, host };
+                    uint32_t graphId = kernel9->graphId;
+                    if (graphId == 0 || !PersistentState::Get().cudaGraphCurrentLaunch.fetch(graphId, apiCall)) {
+                        return matchError(kernel9->correlationId, "KERNEL");
+                    }
+                    // Don't erase cudaGraphCurrentLaunch: multiple kernels in the same
+                    // graph launch share this APICallInfo entry.
                 }
                 apiCall.host->EmitGpuZone(apiCall.start, apiCall.end, kernel9->start, kernel9->end, getKernelSourceLocation(kernel9->name), kernel9->contextId, kernel9->streamId);
                 auto latency_ms = (kernel9->start - apiCall.cupti) / 1'000'000.0;
@@ -1017,12 +1030,10 @@ namespace tracy
                 CUpti_ActivityMemcpy5* memcpy5 = (CUpti_ActivityMemcpy5*) record;
                 APICallInfo apiCall;
                 if (!matchActivityToAPICall(memcpy5->correlationId, apiCall)) {
-                    // Fallback for CUDA Graph memcpy: create GPU zone using
-                    // activity timestamps when no API callback correlation exists.
-                    auto* host = PersistentState::Get().profilerHost;
-                    if (!host) return;
-                    TracyTimestamp cpuTime = tracyFromCUpti(memcpy5->start);
-                    apiCall = APICallInfo{ cpuTime, cpuTime, memcpy5->start, host };
+                    uint32_t graphId = memcpy5->graphId;
+                    if (graphId == 0 || !PersistentState::Get().cudaGraphCurrentLaunch.fetch(graphId, apiCall)) {
+                        return matchError(memcpy5->correlationId, "MEMCPY");
+                    }
                 }
                 static constexpr tracy::SourceLocationData TracyCUPTISrcLocDeviceMemcpy { "CUDA::memcpy", TracyFunction, TracyFile, (uint32_t)TracyLine, tracy::Color::Blue };
                 apiCall.host->EmitGpuZone(apiCall.start, apiCall.end, memcpy5->start, memcpy5->end, &TracyCUPTISrcLocDeviceMemcpy, memcpy5->contextId, memcpy5->streamId);
@@ -1038,12 +1049,10 @@ namespace tracy
                 CUpti_ActivityMemset4* memset4 = (CUpti_ActivityMemset4*) record;
                 APICallInfo apiCall;
                 if (!matchActivityToAPICall(memset4->correlationId, apiCall)) {
-                    // Fallback for CUDA Graph memset: create GPU zone using
-                    // activity timestamps when no API callback correlation exists.
-                    auto* host = PersistentState::Get().profilerHost;
-                    if (!host) return;
-                    TracyTimestamp cpuTime = tracyFromCUpti(memset4->start);
-                    apiCall = APICallInfo{ cpuTime, cpuTime, memset4->start, host };
+                    uint32_t graphId = memset4->graphId;
+                    if (graphId == 0 || !PersistentState::Get().cudaGraphCurrentLaunch.fetch(graphId, apiCall)) {
+                        return matchError(memset4->correlationId, "MEMSET");
+                    }
                 }
                 static constexpr tracy::SourceLocationData TracyCUPTISrcLocDeviceMemset { "CUDA::memset", TracyFunction, TracyFile, (uint32_t)TracyLine, tracy::Color::Blue };
                 apiCall.host->EmitGpuZone(apiCall.start, apiCall.end, memset4->start, memset4->end, &TracyCUPTISrcLocDeviceMemset, memset4->contextId, memset4->streamId);
@@ -1117,6 +1126,18 @@ namespace tracy
                 }
                 break;
             }
+            case CUPTI_ACTIVITY_KIND_GRAPH_TRACE:
+            {
+                // Correlate the cuGraphLaunch API call to the graph's graphId so that
+                // kernel/memcpy/memset activities can look it up via their graphId field.
+                // cuGraphLaunch's correlationId == graphTrace->correlationId (per CUPTI docs).
+                auto* graphTrace = (CUpti_ActivityGraphTrace2*)record;
+                APICallInfo apiCall;
+                if (matchActivityToAPICall(graphTrace->correlationId, apiCall)) {
+                    PersistentState::Get().cudaGraphCurrentLaunch.emplace(graphTrace->graphId, apiCall);
+                }
+                break;
+            }
             case CUPTI_ACTIVITY_KIND_CUDA_EVENT :
             {
                 // NOTE(marcos): a byproduct of CUPTI_ACTIVITY_KIND_SYNCHRONIZATION
@@ -1151,6 +1172,7 @@ namespace tracy
             CUPTI_ACTIVITY_KIND_MEMSET,
             CUPTI_ACTIVITY_KIND_SYNCHRONIZATION,
             CUPTI_ACTIVITY_KIND_MEMORY2,
+            CUPTI_ACTIVITY_KIND_GRAPH_TRACE,
             //CUPTI_ACTIVITY_KIND_MEMCPY2,
             //CUPTI_ACTIVITY_KIND_OVERHEAD,
             //CUPTI_ACTIVITY_KIND_INTERNAL_LAUNCH_API,
@@ -1279,6 +1301,7 @@ namespace tracy
             // NOTE(marcos): these objects do not need to persist, but their relative
             // footprint is trivial enough that we don't care if we let them leak
             ConcurrentHashMap<CorrelationID, APICallInfo> cudaCallSiteInfo;
+            ConcurrentHashMap<uint32_t, APICallInfo> cudaGraphCurrentLaunch;
             ConcurrentHashMap<uintptr_t, int> memAllocAddress;
             CUpti_SubscriberHandle subscriber = {};
             CUDACtx* profilerHost = nullptr;
