@@ -337,6 +337,7 @@ struct ConcurrentHashMap {
     }
     auto fetch(TKey key, TValue& value) {
         ZoneNamed(fetch, instrument);
+        auto lock = acquire_read_lock();
         auto it = mapping.find(key);
         if (it != mapping.end()) {
             value = it->second;
@@ -782,8 +783,8 @@ namespace tracy
                         { CUPTI_RUNTIME_TRACE_CBID_cudaEventQuery_v3020,        NON_STREAM_FUNC() },
                         { CUPTI_RUNTIME_TRACE_CBID_cudaStreamWaitEvent_v3020,   NON_STREAM_FUNC() },
                         { CUPTI_RUNTIME_TRACE_CBID_cudaDeviceSynchronize_v3020, NON_STREAM_FUNC() },
-                        // Graph launch: tracked so we can correlate GPU activities back to
-                        // the cudaGraphLaunch call site via CUPTI_ACTIVITY_KIND_GRAPH_TRACE
+                        // Graph launch: tracked so all CONCURRENT_KERNEL/MEMCPY/MEMSET activities
+                        // sharing the launch's correlationId can be correlated back to this call site.
                         { CUPTI_RUNTIME_TRACE_CBID_cudaGraphLaunch_v10000,      GET_STREAM_FUNC(cudaGraphLaunch_v10000_params, stream) },
                         { CUPTI_RUNTIME_TRACE_CBID_cudaGraphLaunch_ptsz_v10000, GET_STREAM_FUNC(cudaGraphLaunch_v10000_params, stream) },
                     };
@@ -842,8 +843,8 @@ namespace tracy
                         { CUPTI_DRIVER_TRACE_CBID_cuEventSynchronize,    NON_STREAM_FUNC() },
                         { CUPTI_DRIVER_TRACE_CBID_cuCtxSynchronize,      NON_STREAM_FUNC() },
                         { CUPTI_DRIVER_TRACE_CBID_cuStreamWaitEvent,     GET_STREAM_FUNC(cuStreamWaitEvent_params, hStream) },
-                        // Graph launch: tracked so we can correlate GPU activities back to
-                        // the cuGraphLaunch call site via CUPTI_ACTIVITY_KIND_GRAPH_TRACE
+                        // Graph launch: tracked so all CONCURRENT_KERNEL/MEMCPY/MEMSET activities
+                        // sharing the launch's correlationId can be correlated back to this call site.
                         { CUPTI_DRIVER_TRACE_CBID_cuGraphLaunch,          GET_STREAM_FUNC(cuGraphLaunch_params, hStream) },
                         { CUPTI_DRIVER_TRACE_CBID_cuGraphLaunch_ptsz,     GET_STREAM_FUNC(cuGraphLaunch_params, hStream) },
                     };
@@ -916,13 +917,14 @@ namespace tracy
         // via either path.
         static bool matchGraphActivityToAPICall(uint32_t correlationId, uint32_t graphId,
                                                 APICallInfo& apiCallInfo, const char* kind) {
+            auto& graphLaunchCache = PersistentState::Get().cudaGraphCurrentLaunch;
             if (!matchActivityToAPICall(correlationId, apiCallInfo)) {
-                if (graphId == 0 || !PersistentState::Get().cudaGraphCurrentLaunch.fetch(graphId, apiCallInfo)) {
+                if (graphId == 0 || !graphLaunchCache.fetch(graphId, apiCallInfo)) {
                     matchError(correlationId, kind);
                     return false;
                 }
             } else if (graphId != 0) {
-                PersistentState::Get().cudaGraphCurrentLaunch.insert_or_assign(graphId, apiCallInfo);
+                graphLaunchCache.insert_or_assign(graphId, apiCallInfo);
             }
             return true;
         }
