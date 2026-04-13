@@ -361,6 +361,11 @@ struct ConcurrentHashMap {
         auto lock = acquire_write_lock();
         return mapping.erase(key);
     }
+    auto insert_or_assign(TKey key, TValue value) {
+        ZoneNamed(insert_or_assign, instrument);
+        auto lock = acquire_write_lock();
+        return mapping.insert_or_assign(std::move(key), std::move(value));
+    }
 };
 
 #if TRACY_CUDA_ENABLE_CUDA_CALL_STATS
@@ -990,7 +995,7 @@ namespace tracy
                     return false;
                 }
             } else if (graphId != 0) {
-                graphLaunchCache[graphId] = apiCallInfo;
+                graphLaunchCache.insert_or_assign(graphId, apiCallInfo);
             }
             return true;
         }
