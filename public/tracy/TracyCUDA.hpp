@@ -361,11 +361,6 @@ struct ConcurrentHashMap {
         auto lock = acquire_write_lock();
         return mapping.erase(key);
     }
-    auto insert_or_assign(TKey key, TValue value) {
-        ZoneNamed(insert_or_assign, instrument);
-        auto lock = acquire_write_lock();
-        return mapping.insert_or_assign(std::move(key), std::move(value));
-    }
 };
 
 #if TRACY_CUDA_ENABLE_CUDA_CALL_STATS
@@ -648,6 +643,8 @@ namespace tracy
         }
 
         struct CUPTI {
+        using GraphID = uint32_t;
+
         static void CUPTIAPI OnBufferRequested(uint8_t **buffer, size_t *size, size_t *maxNumRecords)
         {
             ZoneScoped;
@@ -662,7 +659,7 @@ namespace tracy
 
         // Returns the graphId field from activity record kinds that carry one,
         // or 0 for records that are not graph-launched or don't have the field.
-        static uint32_t getGraphIdFromRecord(const CUpti_Activity* record) {
+        static GraphID getGraphIdFromRecord(const CUpti_Activity* record) {
             switch (record->kind) {
                 case CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL:
                     return reinterpret_cast<const CUpti_ActivityKernel9*>(record)->graphId;
@@ -692,10 +689,10 @@ namespace tracy
             }
             CUptiResult status;
             CUpti_Activity* record = nullptr;
-            std::unordered_set<uint32_t> graphIdsSeenInBuffer;
+            std::unordered_set<GraphID> graphIdsSeenInBuffer;
             while ((status = cuptiActivityGetNextRecord(buffer, validSize, &record)) == CUPTI_SUCCESS) {
                 if (trackRetirement) {
-                    uint32_t gId = getGraphIdFromRecord(record);
+                    GraphID gId = getGraphIdFromRecord(record);
                     if (gId != 0) graphIdsSeenInBuffer.insert(gId);
                 }
                 DoProcessDeviceEvent(record);
@@ -928,7 +925,7 @@ namespace tracy
                 // Actual erasure is deferred to OnBufferCompleted so we don't
                 // race with CUPTI activity records that are still in-flight.
                 {
-                    uint32_t retireGraphId = 0;
+                    GraphID retireGraphId = 0;
                     if (domain == CUPTI_CB_DOMAIN_RUNTIME_API &&
                         cbid == CUPTI_RUNTIME_TRACE_CBID_cudaGraphExecDestroy_v10000) {
                         auto* p = (cudaGraphExecDestroy_v10000_params*)apiInfo->functionParams;
@@ -985,18 +982,15 @@ namespace tracy
         // All activities in one cuGraphLaunch share the launch's correlationId, so
         // the first activity consumes the cudaCallSiteInfo entry and caches it by
         // graphId; subsequent activities from the same launch find it via graphId.
-        // Returns false (and emits a Tracy error message) only if no match is found
-        // via either path.
-        static bool matchGraphActivityToAPICall(uint32_t correlationId, uint32_t graphId,
-                                                APICallInfo& apiCallInfo, const char* kind) {
+        static bool matchGraphActivityToAPICall(uint32_t correlationId, GraphID graphId,
+                                                APICallInfo& apiCallInfo) {
             auto& graphLaunchCache = PersistentState::Get().cudaGraphCurrentLaunch;
             if (!matchActivityToAPICall(correlationId, apiCallInfo)) {
                 if (graphId == 0 || !graphLaunchCache.fetch(graphId, apiCallInfo)) {
-                    matchError(correlationId, kind);
                     return false;
                 }
             } else if (graphId != 0) {
-                graphLaunchCache.insert_or_assign(graphId, apiCallInfo);
+                graphLaunchCache[graphId] = apiCallInfo;
             }
             return true;
         }
@@ -1103,8 +1097,8 @@ namespace tracy
                 ZoneNamedN(kernel, "tracy::CUDACtx::DoProcessDeviceEvent[kernel]", instrument);
                 CUpti_ActivityKernel9* kernel9 = (CUpti_ActivityKernel9*) record;
                 APICallInfo apiCall;
-                if (!matchGraphActivityToAPICall(kernel9->correlationId, kernel9->graphId, apiCall, "KERNEL")) {
-                    return;
+                if (!matchGraphActivityToAPICall(kernel9->correlationId, kernel9->graphId, apiCall)) {
+                    return matchError(kernel9->correlationId, "KERNEL");
                 }
                 apiCall.host->EmitGpuZone(apiCall.start, apiCall.end, kernel9->start, kernel9->end, getKernelSourceLocation(kernel9->name), kernel9->contextId, kernel9->streamId);
                 auto latency_ms = (kernel9->start - apiCall.cupti) / 1'000'000.0;
@@ -1117,8 +1111,8 @@ namespace tracy
                 ZoneNamedN(kernel, "tracy::CUDACtx::DoProcessDeviceEvent[memcpy]", instrument);
                 CUpti_ActivityMemcpy5* memcpy5 = (CUpti_ActivityMemcpy5*) record;
                 APICallInfo apiCall;
-                if (!matchGraphActivityToAPICall(memcpy5->correlationId, memcpy5->graphId, apiCall, "MEMCPY")) {
-                    return;
+                if (!matchGraphActivityToAPICall(memcpy5->correlationId, memcpy5->graphId, apiCall)) {
+                    return matchError(memcpy5->correlationId, "MEMCPY");
                 }
                 static constexpr tracy::SourceLocationData TracyCUPTISrcLocDeviceMemcpy { "CUDA::memcpy", TracyFunction, TracyFile, (uint32_t)TracyLine, tracy::Color::Blue };
                 apiCall.host->EmitGpuZone(apiCall.start, apiCall.end, memcpy5->start, memcpy5->end, &TracyCUPTISrcLocDeviceMemcpy, memcpy5->contextId, memcpy5->streamId);
@@ -1133,8 +1127,8 @@ namespace tracy
                 ZoneNamedN(kernel, "tracy::CUDACtx::DoProcessDeviceEvent[memset]", instrument);
                 CUpti_ActivityMemset4* memset4 = (CUpti_ActivityMemset4*) record;
                 APICallInfo apiCall;
-                if (!matchGraphActivityToAPICall(memset4->correlationId, memset4->graphId, apiCall, "MEMSET")) {
-                    return;
+                if (!matchGraphActivityToAPICall(memset4->correlationId, memset4->graphId, apiCall)) {
+                    return matchError(memset4->correlationId, "MEMSET");
                 }
                 static constexpr tracy::SourceLocationData TracyCUPTISrcLocDeviceMemset { "CUDA::memset", TracyFunction, TracyFile, (uint32_t)TracyLine, tracy::Color::Blue };
                 apiCall.host->EmitGpuZone(apiCall.start, apiCall.end, memset4->start, memset4->end, &TracyCUPTISrcLocDeviceMemset, memset4->contextId, memset4->streamId);
@@ -1377,13 +1371,13 @@ namespace tracy
             // NOTE(marcos): these objects do not need to persist, but their relative
             // footprint is trivial enough that we don't care if we let them leak
             ConcurrentHashMap<CorrelationID, APICallInfo> cudaCallSiteInfo;
-            ConcurrentHashMap<uint32_t, APICallInfo> cudaGraphCurrentLaunch;
+            ConcurrentHashMap<GraphID, APICallInfo> cudaGraphCurrentLaunch;
             ConcurrentHashMap<uintptr_t, int> memAllocAddress;
             // Pending retirement: graphIds whose exec handles have been destroyed.
             // Entries are erased from cudaGraphCurrentLaunch in OnBufferCompleted
             // once no further activity records for the exec arrive in a buffer.
             std::mutex graphRetireMutex;
-            std::unordered_set<uint32_t> graphExecPendingRetire;
+            std::unordered_set<GraphID> graphExecPendingRetire;
             CUpti_SubscriberHandle subscriber = {};
             CUDACtx* profilerHost = nullptr;
 
