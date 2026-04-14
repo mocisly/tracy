@@ -1374,7 +1374,7 @@ static ProfilerThreadData& GetProfilerThreadData()
 #endif
 
 TRACY_API moodycamel::ConcurrentQueue<QueueItem>::ExplicitProducer* GetToken() { return GetProfilerThreadData().token.ptr; }
-TRACY_API Profiler& GetProfiler() { return GetProfilerData().profiler; }
+TRACY_API Profiler& MANGLED_NAME_BASED_ON_DEFINES(GetProfiler)() { return GetProfilerData().profiler; }
 TRACY_API moodycamel::ConcurrentQueue<QueueItem>& GetQueue() { return GetProfilerData().queue; }
 TRACY_API int64_t GetInitTime() { return GetProfilerData().initTime; }
 TRACY_API std::atomic<uint32_t>& GetLockCounter() { return GetProfilerData().lockCounter; }
@@ -1434,7 +1434,7 @@ thread_local LuaZoneState init_order(104) s_luaZoneState { 0, false };
 static Profiler init_order(105) s_profiler;
 
 TRACY_API moodycamel::ConcurrentQueue<QueueItem>::ExplicitProducer* GetToken() { return s_token.ptr; }
-TRACY_API Profiler& GetProfiler() { return s_profiler; }
+TRACY_API Profiler& MANGLED_NAME_BASED_ON_DEFINES(GetProfiler)() { return s_profiler; }
 TRACY_API moodycamel::ConcurrentQueue<QueueItem>& GetQueue() { return s_queue; }
 TRACY_API int64_t GetInitTime() { return s_initTime.val; }
 TRACY_API std::atomic<uint32_t>& GetLockCounter() { return s_lockCounter; }
