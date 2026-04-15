@@ -165,6 +165,7 @@ client_includes = [
     'public/client/TracyFastVector.hpp',
     'public/client/TracyKCore.hpp',
     'public/client/TracyLock.hpp',
+    'public/client/TracyMangle.hpp',
     'public/client/TracyProfiler.hpp',
     'public/client/TracyRingBuffer.hpp',
     'public/client/TracyScoped.hpp',

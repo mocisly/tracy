@@ -12,6 +12,7 @@
 #include "tracy_SPSCQueue.h"
 #include "TracyCallstack.hpp"
 #include "TracyKCore.hpp"
+#include "TracyMangle.hpp"
 #include "TracySysPower.hpp"
 #include "TracySysTime.hpp"
 #include "TracyFastVector.hpp"
@@ -60,59 +61,6 @@
 #  define TracyConcatIndirect(x,y) x##y
 #endif
 
-#ifdef TRACY_ENABLE
-#define TRACY_ENABLE_MANGLE _E1
-#else
-#define TRACY_ENABLE_MANGLE _E0
-#endif
-
-#ifdef TRACY_ON_DEMAND
-#define TRACY_ON_DEMAND_MANGLE _OD1
-#else
-#define TRACY_ON_DEMAND_MANGLE _OD0
-#endif
-
-#ifdef TRACY_DELAYED_INIT
-#define TRACY_DELAYED_INIT_MANGLE _DI1
-#else
-#define TRACY_DELAYED_INIT_MANGLE _DI0
-#endif
-
-#ifdef TRACY_MANUAL_LIFETIME
-#define TRACY_MANUAL_LIFETIME_MANGLE _ML1
-#else
-#define TRACY_MANUAL_LIFETIME_MANGLE _ML0
-#endif
-
-#ifdef TRACY_FIBERS
-#define TRACY_FIBERS_MANGLE _F1
-#else
-#define TRACY_FIBERS_MANGLE _F0
-#endif
-
-#ifdef TRACY_DISALLOW_HW_TIMER
-#define TRACY_DISALLOW_HW_TIMER_MANGLE _DHT1
-#else
-#define TRACY_DISALLOW_HW_TIMER_MANGLE _DHT0
-#endif
-
-#ifdef TRACY_TIMER_FALLBACK
-#define TRACY_TIMER_FALLBACK_MANGLE _TF1
-#else
-#define TRACY_TIMER_FALLBACK_MANGLE _TF0
-#endif
-
-#define MANGLED_NAME_BASED_ON_DEFINES(base) \
-    TracyConcat(TracyConcat(TracyConcat(TracyConcat(TracyConcat(TracyConcat(TracyConcat( \
-    base##_CFG, \
-    TRACY_ENABLE_MANGLE), \
-    TRACY_ON_DEMAND_MANGLE), \
-    TRACY_DELAYED_INIT_MANGLE), \
-    TRACY_MANUAL_LIFETIME_MANGLE), \
-    TRACY_FIBERS_MANGLE), \
-    TRACY_DISALLOW_HW_TIMER_MANGLE), \
-    TRACY_TIMER_FALLBACK_MANGLE)
-
 namespace tracy
 {
 #if defined(TRACY_DELAYED_INIT) && defined(TRACY_MANUAL_LIFETIME)
@@ -138,8 +86,8 @@ struct GpuCtxWrapper
 };
 
 TRACY_API moodycamel::ConcurrentQueue<QueueItem>::ExplicitProducer* GetToken();
-TRACY_API Profiler& MANGLED_NAME_BASED_ON_DEFINES(GetProfiler)();
-tracy_force_inline Profiler& GetProfiler() { return MANGLED_NAME_BASED_ON_DEFINES(GetProfiler)(); }
+TRACY_API Profiler& MANGLED_NAME_BASED_ON_CONFIG(GetProfiler)();
+tracy_force_inline Profiler& GetProfiler() { return MANGLED_NAME_BASED_ON_CONFIG(GetProfiler)(); }
 TRACY_API std::atomic<uint32_t>& GetLockCounter();
 TRACY_API std::atomic<uint8_t>& GetGpuCtxCounter();
 TRACY_API GpuCtxWrapper& GetGpuCtx();
