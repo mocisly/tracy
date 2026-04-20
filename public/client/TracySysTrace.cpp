@@ -34,7 +34,7 @@ static int GetSamplingFrequency()
 #endif
 }
 
-static int SamplingFrequencyToPeriodNs(  int samplingHz )
+static int SamplingFrequencyToPeriodNs( int samplingHz )
 {
     return 1000000000 / samplingHz;
 }
