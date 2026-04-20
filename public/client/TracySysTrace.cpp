@@ -657,16 +657,15 @@ bool SysTraceStart( int64_t& samplingPeriod )
     int samplingFrequency = GetSamplingFrequency();
     if( samplingFrequency > 0 )
     {
-        FILE* f = fopen( "/proc/sys/kernel/perf_event_max_sample_rate", "r" );
-        if( f )
+        const auto maxSampleRateStr = ReadFile( "/proc/sys/kernel/perf_event_max_sample_rate" );
+        if( maxSampleRateStr )
         {
-            int sysMax;
-            if( fscanf( f, "%d", &sysMax ) == 1 && samplingFrequency > sysMax )
+            const int sysMax = atoi( maxSampleRateStr );
+            if( sysMax > 0 && sysMax < samplingFrequency )
             {
                 TracyDebug( "Requested sampling frequency %d Hz is higher than system maximum of %d Hz, reducing to system maximum.", samplingFrequency, sysMax );
                 samplingFrequency = sysMax;
             }
-            fclose( f );
         }
     }
     samplingPeriod = SamplingFrequencyToPeriodNs( samplingFrequency );
